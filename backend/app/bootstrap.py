@@ -6,8 +6,9 @@ cold starts can race. Unique constraints make a lost race harmless, so we just r
 
 import logging
 import threading
+import time
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlmodel import Session, SQLModel
 
 from .db import engine
@@ -25,7 +26,17 @@ def ensure_ready() -> None:
     with _lock:
         if _ready:
             return
-        SQLModel.metadata.create_all(engine)
+        # Two cold starts can try to create the same tables at once; the loser gets a duplicate-key error.
+        # Retrying is safe because create_all skips tables that now exist.
+        for attempt in range(4):
+            try:
+                SQLModel.metadata.create_all(engine)
+                break
+            except DBAPIError:
+                if attempt == 3:
+                    raise
+                log.info("Table creation raced with another instance; retrying.")
+                time.sleep(0.5 * (attempt + 1))
         try:
             with Session(engine) as session:
                 seed(session)
